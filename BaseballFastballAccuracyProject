@@ -1,0 +1,220 @@
+from pandas import *
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+pd.set_option('display.max_rows', 100000)
+
+#import raw pitch data
+PitchingData = pd.read_excel(("/Users/mac/Desktop/fastballcommand.xlsx"))
+
+#remove lines with NA's, label 3-0 counts, ensure certain columns were strings
+PitchingData = PitchingData.dropna()
+PitchingData['PitcherID'] = PitchingData['PitcherID'].astype(str)
+PitchingData['PitchType'] = PitchingData['PitchType'].astype(str)
+PitchingData['SkewedCount'] = np.where((PitchingData["Balls"]==3) & (PitchingData["Strikes"]==0) ,"Skewed","Fine")
+
+#balls, strikes, and unknown rows, determine velocity buckets for both types of fastballs for each pitcher 
+UpdatedPitchingData = pd.DataFrame()
+UpdatedPitcherFrame = pd.DataFrame()
+UniquePitcherIDs = PitchingData["PitcherID"].unique()
+UniquePitchTypes = PitchingData["PitchType"].unique()
+
+for i in UniquePitcherIDs:
+    PitcherFrame = "Pframe_" + str(i)
+    PitcherFrame = PitchingData[PitchingData['PitcherID'].str.contains(str(i))].copy()
+    PitcherFrame.loc[:, ('StrikeIndicator')] = np.where((PitcherFrame.loc[:, ('Balls')].shift(-1) == PitcherFrame.loc[:, ('Balls')].shift(0)),1,0).copy()
+    PitcherFrame.loc[:, ('StrikeIndicator')] = np.where((PitcherFrame.loc[:, ('GamePitchSequence')].shift(-1) != (PitcherFrame.loc[:, ('GamePitchSequence')].shift(0))+1),"Unknown", PitcherFrame.loc[:, ('StrikeIndicator')]).copy()
+    PitcherFrame.loc[:, ('StrikeIndicator')] = np.where((PitcherFrame.loc[:, ('PAofInning')].shift(-1) != (PitcherFrame.loc[:, ('PAofInning')].shift(0))),"Unknown", PitcherFrame.loc[:, ('StrikeIndicator')]).copy()
+    
+    for y in UniquePitchTypes:
+        PitchTypeFrame = "PTframe_" + str(y) + str(i)
+        PitchTypeFrame = PitcherFrame[PitcherFrame['PitchType'].str.contains(str(y))].copy()
+        LowestSpeed = min(PitchTypeFrame.loc[:, ('Velocity')])
+        HighestSpeed = max(PitchTypeFrame.loc[:, ('Velocity')])
+        SpeedRange = HighestSpeed - LowestSpeed
+        TTP = (1/3)*SpeedRange + LowestSpeed
+        SSP = (2/3)*SpeedRange + LowestSpeed
+        
+        rLowestSpeed = round(LowestSpeed,2)
+        rHighestSpeed = round(HighestSpeed,2)
+        rTTP = round(TTP,2)
+        rSSP = round(SSP,2)
+    
+        PitchTypeFrame.loc[:, ('VelocityBucket')] = np.where((PitchTypeFrame.loc[:, ('Velocity')]>=LowestSpeed)&(PitchTypeFrame.loc[:, ('Velocity')]<TTP),str(rLowestSpeed) + "_to_" + str(rTTP),"0").copy()
+        PitchTypeFrame.loc[:, ('VelocityBucket')] = np.where((PitchTypeFrame.loc[:, ('Velocity')]>=TTP)&(PitchTypeFrame.loc[:, ('Velocity')]<SSP),str(rTTP) + "_to_" + str(rSSP),PitchTypeFrame.loc[:, ('VelocityBucket')]).copy()
+        PitchTypeFrame.loc[:, ('VelocityBucket')] = np.where((PitchTypeFrame.loc[:, ('Velocity')]>=SSP)&(PitchTypeFrame.loc[:, ('Velocity')]<=HighestSpeed),str(rSSP) + "_to_" + str(rHighestSpeed),PitchTypeFrame.loc[:, ('VelocityBucket')]).copy()
+    
+        UpdatedPitcherFrame = UpdatedPitcherFrame.append(PitchTypeFrame)
+        continue
+    
+UpdatedPitchingData =  UpdatedPitchingData.append(UpdatedPitcherFrame)
+
+UpdatedPitchingData.loc[:,("TotalBreak")] = np.sqrt(np.square(UpdatedPitchingData['VerticalBreak']) + np.square(UpdatedPitchingData['HorizontalBreak']))
+UpdatedPitchingData.loc[:,("BreakAngle")] = np.degrees(np.arctan((UpdatedPitchingData['VerticalBreak']*(-1))/UpdatedPitchingData['HorizontalBreak']))
+
+#graph just the balls
+FilteredBalls = UpdatedPitchingData[(UpdatedPitchingData.StrikeIndicator == "0")]
+x = FilteredBalls["PlateLocSide"].values
+y = FilteredBalls["PlateLocHeight"].values
+plt.hist2d(x, y, (150,150), cmap=plt.cm.jet)
+plt.colorbar()
+
+#high point of strikezone
+HighBalls = FilteredBalls[(FilteredBalls.PlateLocHeight > 2.5) & (FilteredBalls.PlateLocSide > -0.5) & (FilteredBalls.PlateLocSide < 0.5)]
+HighBalls = HighBalls.sort_values(by=['PlateLocHeight'], ascending = False ) #going from lowest to highest 
+row_count = HighBalls.shape[0] 
+Bottom = 0.85*row_count
+Bottom = round(Bottom)
+AdjustedHighBalls = HighBalls[0:Bottom]
+HighCoordinate = min(AdjustedHighBalls["PlateLocHeight"])
+
+#low point of strikezone
+LowBalls = FilteredBalls[(FilteredBalls.PlateLocHeight < 2.5) & (FilteredBalls.PlateLocSide > -0.5) & (FilteredBalls.PlateLocSide < 0.5)]
+LowBalls = LowBalls.sort_values(by=['PlateLocHeight']) #going from hightest to highest 
+row_count = LowBalls.shape[0] 
+Bottom = 0.85*row_count
+Bottom = round(Bottom)
+AdjustedLowBalls = LowBalls[0:Bottom]
+LowCoordinate = max(AdjustedLowBalls["PlateLocHeight"])
+
+#first and third base coordinates of zone
+Strike_Zone_Width = 17/12 + 2*(2.3/12)
+ThirdBaseCoordinate = Strike_Zone_Width/2
+FirstBaseCoordinate = Strike_Zone_Width/(-2)
+
+#upper and lower quartiles for quality located pitches
+Strike_Zone_Height = HighCoordinate - LowCoordinate
+TFP_Height = Strike_Zone_Height/6
+Upper_Point_QS = HighCoordinate - TFP_Height
+Lower_Point_QS = LowCoordinate + TFP_Height
+
+#third base and first base quartiles for quality located pitches
+TFP_Width = Strike_Zone_Width/6
+Third_Base_QS = (Strike_Zone_Width/2) - TFP_Width
+First_Base_QS = (Strike_Zone_Width/(-2)) + TFP_Width
+
+#percentage of total pitches that were quality located
+PitchCoordinates = UpdatedPitchingData[(UpdatedPitchingData.SkewedCount == "Fine")].copy()
+
+PitchCoordinates.loc[:,('Horizontal_Quality_Strike_Indicator')] = np.where(((PitchCoordinates["PlateLocSide"]<ThirdBaseCoordinate) & (PitchCoordinates["PlateLocSide"]>Third_Base_QS)) |  ((PitchCoordinates["PlateLocSide"]>FirstBaseCoordinate) & (PitchCoordinates["PlateLocSide"]<First_Base_QS)),"Quality","No").copy()
+PitchCoordinates.loc[:,('Vertical_Quality_Strike_Indicator')] = np.where(((PitchCoordinates["PlateLocHeight"]<HighCoordinate) & (PitchCoordinates["PlateLocHeight"]>Upper_Point_QS)) |  ((PitchCoordinates["PlateLocHeight"]>LowCoordinate) & (PitchCoordinates["PlateLocHeight"]<Lower_Point_QS)),"Quality","No").copy()
+selected_cols = ['Vertical_Quality_Strike_Indicator','Horizontal_Quality_Strike_Indicator']
+QualityPitch = (PitchCoordinates[PitchCoordinates[selected_cols].apply(lambda x: x.str.contains('Quality')).any(axis=1)]).copy()
+QualityPitch = (QualityPitch[(QualityPitch.PlateLocHeight > LowCoordinate) & (QualityPitch.PlateLocHeight < HighCoordinate)]).copy()
+QualityPitch = (QualityPitch[(QualityPitch.PlateLocSide > FirstBaseCoordinate) & (QualityPitch.PlateLocSide < ThirdBaseCoordinate)]).copy()
+
+j = QualityPitch["PlateLocSide"].values
+k = QualityPitch["PlateLocHeight"].values
+
+Number_of_Quality_Pitches = (QualityPitch.groupby(['PitcherID'])['Balls'].apply(lambda x: (x).shape[0]).reset_index(name='QLF')).copy()
+Number_of_Pitches = (PitchCoordinates.groupby(['PitcherID'])['Balls'].apply(lambda x: (x).shape[0]).reset_index(name='Total_Pitches')).copy()
+
+Percentage_of_Quality_Pitches = pd.merge(Number_of_Quality_Pitches,Number_of_Pitches,on='PitcherID')
+Percentage_of_Quality_Pitches.loc[:,("Percentage_of_QLF")]=(Percentage_of_Quality_Pitches["QLF"]/Percentage_of_Quality_Pitches["Total_Pitches"]).copy()
+
+Percentage_of_Quality_Pitches = Percentage_of_Quality_Pitches.sort_values(by=["Percentage_of_QLF"], ascending = False ).copy()
+Percentage_of_Quality_Pitches.rename(columns={'Total_Pitches':'Total_Fastballs'}, inplace=True)
+Percentage_of_Quality_Pitches
+
+#pitch movement statistics
+NumberofPitches = (UpdatedPitchingData.groupby(['PitcherID','PitchType','VelocityBucket'])['TotalBreak'].apply(lambda x: (x).size).reset_index(name='Number_of_Pitches')).copy()
+MovementStd = (UpdatedPitchingData.groupby(['PitcherID','PitchType','VelocityBucket'])['TotalBreak'].apply(lambda x: np.std(x)).reset_index(name='Movement_Std')).copy()
+AngleStd = (UpdatedPitchingData.groupby(['PitcherID','PitchType','VelocityBucket'])['BreakAngle'].apply(lambda x: np.std(x)).reset_index(name='Angle_Std')).copy()
+MovementAvg = (UpdatedPitchingData.groupby(['PitcherID','PitchType','VelocityBucket'])['TotalBreak'].apply(lambda x: np.mean(x)).reset_index(name='Movement_Average')).copy()
+AngleAvg = (UpdatedPitchingData.groupby(['PitcherID','PitchType','VelocityBucket'])['BreakAngle'].apply(lambda x: np.mean(x)).reset_index(name='Angle_Average')).copy()
+
+MovementBreakdown = pd.merge(AngleStd,MovementStd)
+MovementBreakdown = pd.merge(MovementBreakdown,MovementAvg)
+MovementBreakdown = pd.merge(MovementBreakdown,AngleAvg)
+MovementBreakdown = pd.merge(MovementBreakdown,NumberofPitches)
+MovementBreakdown
+
+#best repeatability by break angle
+Angle_MBSPitchTypeFrameScored = pd.DataFrame()
+
+MBPitchTypeFrame = MovementBreakdown.sort_values(by=["Angle_Std"], ascending = False).copy()
+MBPitchTypeFrame["Points"] = MBPitchTypeFrame["Angle_Std"].rank(ascending=False)
+
+for b in UniquePitcherIDs:
+    MBSPitchTypeFrame = "MBSframe_" + str(b)
+    MBSPitchTypeFrame = MBPitchTypeFrame[MBPitchTypeFrame['PitcherID'].str.contains(str(b))].copy()
+    Total_Pitches = MBSPitchTypeFrame.loc[:, ('Number_of_Pitches')].sum()
+    MBSPitchTypeFrame.loc[:, ('Weight')] = MBSPitchTypeFrame.loc[:, ('Number_of_Pitches')]/Total_Pitches
+    MBSPitchTypeFrame.loc[:, ('Weighted_Points')] = MBSPitchTypeFrame.loc[:, ('Weight')]*MBSPitchTypeFrame.loc[:, ('Points')]
+    Angle_MBSPitchTypeFrameScored = Angle_MBSPitchTypeFrameScored.append(MBSPitchTypeFrame)
+
+Angle_MBSPitchTypeFrameScored = (Angle_MBSPitchTypeFrameScored.groupby(['PitcherID'])['Weighted_Points'].apply(lambda x: x.sum()).reset_index(name='Angle_Total_Weighted_Points')).copy()
+Angle_MBSPitchTypeFrameScored
+
+#best repeatability by total movement
+Movement_MBSPitchTypeFrameScored = pd.DataFrame()
+
+MBPitchTypeFrame = MovementBreakdown.sort_values(by=["Movement_Std"], ascending = False ).copy()
+MBPitchTypeFrame["Points"] = MBPitchTypeFrame["Movement_Std"].rank(ascending=False)
+
+for b in UniquePitcherIDs:
+    MBSPitchTypeFrame = "MBSframe_" + str(b)
+    MBSPitchTypeFrame = MBPitchTypeFrame[MBPitchTypeFrame['PitcherID'].str.contains(str(b))].copy()
+    Total_Pitches = MBSPitchTypeFrame.loc[:, ('Number_of_Pitches')].sum()
+    MBSPitchTypeFrame.loc[:, ('Weight')] = MBSPitchTypeFrame.loc[:, ('Number_of_Pitches')]/Total_Pitches
+    MBSPitchTypeFrame.loc[:, ('Weighted_Points')] = MBSPitchTypeFrame.loc[:, ('Weight')]*MBSPitchTypeFrame.loc[:, ('Points')]
+
+    Movement_MBSPitchTypeFrameScored = Movement_MBSPitchTypeFrameScored.append(MBSPitchTypeFrame)
+
+Movement_MBSPitchTypeFrameScored = Movement_MBSPitchTypeFrameScored.groupby(['PitcherID'])['Weighted_Points'].apply(lambda x: x.sum()).reset_index(name='Movement_Total_Weighted_Points').copy()
+Movement_MBSPitchTypeFrameScored
+
+#best repeatability aggregated
+FinalScoredonDeviation = pd.merge(Movement_MBSPitchTypeFrameScored,Angle_MBSPitchTypeFrameScored,on='PitcherID')
+FinalScoredonDeviation.loc[:, ('Total_Deviation_Points')] = FinalScoredonDeviation.loc[:, ('Movement_Total_Weighted_Points')] + FinalScoredonDeviation.loc[:, ('Angle_Total_Weighted_Points')]
+FinalScoredonDeviation = FinalScoredonDeviation.sort_values(by=['Total_Deviation_Points'], ascending = False ).copy()
+FinalScoredonDeviation
+
+#percentage of total pitches that were quality commanded
+Range_Stats = pd.merge(QualityPitch,MovementBreakdown,on=['PitcherID','PitchType','VelocityBucket'])
+Range_Stats.loc[:,('Quality_Commanded_Strike_Indicator')] = np.where(((Range_Stats["TotalBreak"])<(Range_Stats["Movement_Average"]*1.15)) & ((Range_Stats["TotalBreak"])>(Range_Stats["Movement_Average"]*0.85)) & (abs(Range_Stats["BreakAngle"])<abs(Range_Stats["Angle_Average"]*1.15)) & (abs(Range_Stats["BreakAngle"])>abs(Range_Stats["Angle_Average"]*0.85)),"Quality_Commanded","No").copy()
+Range_Stats = Range_Stats[(Range_Stats.Quality_Commanded_Strike_Indicator == "Quality_Commanded")]
+Number_of_Quality_Commanded_Pitches = (Range_Stats.groupby(['PitcherID'])['Balls'].apply(lambda x: (x).shape[0]).reset_index(name='QCF')).copy()
+Number_of_Quality_Commanded_Pitches = pd.merge(Number_of_Quality_Commanded_Pitches,Number_of_Pitches,on='PitcherID')
+Number_of_Quality_Commanded_Pitches.loc[:,("Percentage_of_QCF")]=Number_of_Quality_Commanded_Pitches["QCF"]/Number_of_Quality_Commanded_Pitches["Total_Pitches"]
+Number_of_Quality_Commanded_Pitches = Number_of_Quality_Commanded_Pitches.sort_values(by=['Percentage_of_QCF'], ascending = False ).copy()
+Number_of_Quality_Commanded_Pitches.rename(columns={'Total_Pitches':'Total_Fastballs'}, inplace=True)
+Number_of_Quality_Commanded_Pitches
+
+#final graphs
+for m in UniquePitcherIDs:
+    AllPitches = "AllPitches_" + str(m)
+    AllPitches = PitchCoordinates[PitchCoordinates['PitcherID'].str.contains(str(m))]
+    q = AllPitches["PlateLocSide"].values
+    w = AllPitches["PlateLocHeight"].values
+    
+    QualityPitchesNC = "QualityPitchesNC_" + str(m)
+    QualityPitchesNC = QualityPitch[QualityPitch['PitcherID'].str.contains(str(m))]
+    e = QualityPitchesNC["PlateLocSide"].values
+    r = QualityPitchesNC["PlateLocHeight"].values
+    
+    QualityCommandedPitches = "QualityPitchesNC_" + str(m)
+    QualityCommandedPitches = Range_Stats[Range_Stats['PitcherID'].str.contains(str(m))]
+    t = QualityCommandedPitches["PlateLocSide"].values
+    u = QualityCommandedPitches["PlateLocHeight"].values
+    
+    plt.figure(figsize = (8, 8))
+
+    plt.scatter(q, w,(1,1),color = "blue",label='Poorly Located Fastballs',cmap=plt.cm.jet)
+    plt.scatter(e, r,(1,1), color = "red",label='Quality Located Fastballs',cmap=plt.cm.jet)
+    plt.scatter(t, u,(1,1),color = "green",label='Quality Commanded Fastballs',cmap=plt.cm.jet)
+    plt.xlim(-4, 4)
+    plt.ylim(0, 8)
+    plt.legend(loc="upper left")
+
+    plt.savefig("/Users/mac/Desktop/Charts/FinalChart_" + str(m) + ".png")
+
+    
+    plt.show()
+
+#determining QCP plus 
+Quality_Commanded_Pitches_Plus = (Number_of_Quality_Commanded_Pitches[["PitcherID","Percentage_of_QCF"]]).copy()
+Average_QCP = Quality_Commanded_Pitches_Plus.loc[:,("Percentage_of_QCF")].mean()
+Quality_Commanded_Pitches_Plus.loc[:,("QCF+")] = round((Quality_Commanded_Pitches_Plus.loc[:,("Percentage_of_QCF")]/Average_QCP*100)).copy()
+Quality_Commanded_Pitches_Plus.loc[:,("QCF+")] = Quality_Commanded_Pitches_Plus.loc[:,("QCF+")].astype(int) 
+Quality_Commanded_Pitches_Plus
